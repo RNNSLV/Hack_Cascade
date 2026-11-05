@@ -1,0 +1,872 @@
+--
+-- PostgreSQL database dump
+--
+
+\restrict a1EvXQZZhgkzsd27MbOpm1DIYAwnmThqfm1bhvWgpQKTuRRC1T9iqjtyMeff3Zw
+
+-- Dumped from database version 17.9 (Debian 17.9-1.pgdg13+1)
+-- Dumped by pg_dump version 18.4
+
+-- Started on 2026-10-27 17:33:33
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- TOC entry 8 (class 2615 OID 95621)
+-- Name: InHire; Type: SCHEMA; Schema: -; Owner: postgres
+--
+
+CREATE SCHEMA "InHire";
+
+
+ALTER SCHEMA "InHire" OWNER TO hackathon;
+
+--
+-- TOC entry 257 (class 1255 OID 95931)
+-- Name: buscar_profissionais(integer, integer, bigint, bigint[], integer, bigint[], bigint); Type: FUNCTION; Schema: InHire; Owner: postgres
+--
+
+CREATE FUNCTION "InHire".buscar_profissionais(p_ano integer, p_mes integer, p_senioridade bigint DEFAULT NULL::bigint, p_skills bigint[] DEFAULT '{}'::bigint[], p_disponibilidade_min integer DEFAULT 0, p_cargos bigint[] DEFAULT NULL::bigint[], p_colaborador bigint DEFAULT NULL::bigint) RETURNS TABLE(id_colaborador bigint, nome_ficticio character varying, id_cargo bigint, id_senioridade bigint, total_alocado bigint, disponibilidade bigint)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'InHire'
+    AS $$
+BEGIN
+ IF p_ano IS NULL OR p_ano NOT BETWEEN 1 AND 9999 OR p_mes IS NULL OR p_mes NOT BETWEEN 1 AND 12
+ OR p_disponibilidade_min IS NULL OR p_disponibilidade_min>100
+ OR (p_senioridade IS NOT NULL AND p_senioridade<=0)
+ OR (p_colaborador IS NOT NULL AND p_colaborador<=0)
+ OR EXISTS(SELECT 1 FROM unnest(p_skills) id WHERE id IS NULL OR id<=0)
+ OR EXISTS(SELECT 1 FROM unnest(p_cargos) id WHERE id IS NULL OR id<=0)
+ THEN RAISE EXCEPTION 'Parametros de busca invalidos' USING ERRCODE='22023'; END IF;
+ RETURN QUERY
+ SELECT c.id,c.nome_abreviado,c.id_cargo,c.id_senioridade,d.total_alocado,d.disponibilidade
+ FROM "InHire".disponibilidade_mensal(p_ano,p_mes) d
+ JOIN "InHire".colaboradores c ON c.id=d.id_colaborador
+ WHERE c.status IS TRUE AND c.deletado IS FALSE
+ AND (p_senioridade IS NULL OR c.id_senioridade=p_senioridade)
+ AND (p_cargos IS NULL OR c.id_cargo=ANY(p_cargos))
+ AND (p_colaborador IS NULL OR c.id=p_colaborador)
+ AND d.disponibilidade>=p_disponibilidade_min
+ AND NOT EXISTS(
+  SELECT 1 FROM unnest(coalesce(p_skills,'{}'::BIGINT[])) requerida(id)
+  WHERE NOT EXISTS(SELECT 1 FROM "InHire".colaborador_skills cs
+    JOIN "InHire".skills s ON s.id=cs.id_skill
+    WHERE cs.id_colaborador=c.id AND s.id=requerida.id
+      AND cs.status IS TRUE AND cs.deletado IS FALSE
+      AND s.status IS TRUE AND s.deletado IS FALSE)
+ );
+END;
+$$;
+
+
+ALTER FUNCTION "InHire".buscar_profissionais(p_ano integer, p_mes integer, p_senioridade bigint, p_skills bigint[], p_disponibilidade_min integer, p_cargos bigint[], p_colaborador bigint) OWNER TO hackathon;
+
+--
+-- TOC entry 256 (class 1255 OID 95930)
+-- Name: disponibilidade_mensal(integer, integer); Type: FUNCTION; Schema: InHire; Owner: postgres
+--
+
+CREATE FUNCTION "InHire".disponibilidade_mensal(p_ano integer, p_mes integer) RETURNS TABLE(id_colaborador bigint, ano integer, mes integer, total_alocado bigint, disponibilidade bigint, status_colaborador boolean, colaborador_excluido boolean)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'InHire'
+    AS $$
+DECLARE v_mes TEXT;
+BEGIN
+    IF p_ano IS NULL OR p_ano NOT BETWEEN 1 AND 9999
+       OR p_mes IS NULL OR p_mes NOT BETWEEN 1 AND 12 THEN
+        RAISE EXCEPTION 'Ano ou mes invalido' USING ERRCODE = '22023';
+    END IF;
+    v_mes := (ARRAY['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'])[p_mes];
+    RETURN QUERY
+    WITH totais AS (
+        SELECT a.id_colaborador, sum(p.porcentagem) percentual
+        FROM "InHire".planejamentos p
+        JOIN "InHire".alocacoes a ON a.id=p.id_alocacao
+        WHERE p.ano=p_ano AND p.mes=v_mes
+          AND p.status IS TRUE AND p.deletado IS FALSE
+          AND a.status IS TRUE AND a.deletado IS FALSE
+        GROUP BY a.id_colaborador
+    )
+    SELECT c.id,p_ano,p_mes,coalesce(t.percentual,0::BIGINT),
+           100::BIGINT-coalesce(t.percentual,0::BIGINT),c.status,c.deletado
+    FROM "InHire".colaboradores c LEFT JOIN totais t ON t.id_colaborador=c.id;
+END;
+$$;
+
+
+ALTER FUNCTION "InHire".disponibilidade_mensal(p_ano integer, p_mes integer) OWNER TO hackathon;
+
+--
+-- TOC entry 259 (class 1255 OID 96262)
+-- Name: disponibilidade_periodo(integer, integer, integer, integer); Type: FUNCTION; Schema: InHire; Owner: postgres
+--
+
+CREATE FUNCTION "InHire".disponibilidade_periodo(p_ano_inicio integer, p_mes_inicio integer, p_ano_fim integer, p_mes_fim integer) RETURNS TABLE(id_colaborador bigint, meses integer, disponibilidade_media numeric, disponibilidade_minima bigint, disponibilidade_maxima bigint, meses_sem_alocacao integer)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'InHire'
+    AS $$
+BEGIN
+ IF p_ano_inicio IS NULL OR p_ano_fim IS NULL
+ OR p_ano_inicio NOT BETWEEN 1 AND 9999 OR p_ano_fim NOT BETWEEN 1 AND 9999
+ OR p_mes_inicio IS NULL OR p_mes_fim IS NULL
+ OR p_mes_inicio NOT BETWEEN 1 AND 12 OR p_mes_fim NOT BETWEEN 1 AND 12
+ OR (p_ano_fim*12+p_mes_fim)<(p_ano_inicio*12+p_mes_inicio)
+ OR (p_ano_fim*12+p_mes_fim)-(p_ano_inicio*12+p_mes_inicio)>60
+ THEN RAISE EXCEPTION 'Periodo invalido ou superior a 61 meses' USING ERRCODE='22023'; END IF;
+ RETURN QUERY
+ WITH calendario AS (
+  SELECT n, (n-1)/12 AS ano, (n-1)%12+1 AS mes
+  FROM generate_series(p_ano_inicio*12+p_mes_inicio,p_ano_fim*12+p_mes_fim) n
+ ), quadro AS (
+  SELECT f.id_colaborador, f.disponibilidade, f.total_alocado
+  FROM calendario k
+  CROSS JOIN LATERAL "InHire".disponibilidade_mensal(k.ano,k.mes) f
+ )
+ SELECT q.id_colaborador, count(*)::integer, round(avg(q.disponibilidade),2),
+        min(q.disponibilidade), max(q.disponibilidade),
+        count(*) FILTER (WHERE q.total_alocado=0)::integer
+ FROM quadro q GROUP BY q.id_colaborador ORDER BY q.id_colaborador;
+END
+$$;
+
+
+ALTER FUNCTION "InHire".disponibilidade_periodo(p_ano_inicio integer, p_mes_inicio integer, p_ano_fim integer, p_mes_fim integer) OWNER TO hackathon;
+
+--
+-- TOC entry 258 (class 1255 OID 96261)
+-- Name: ranking_skills(integer, integer, text[], integer, boolean, bigint); Type: FUNCTION; Schema: InHire; Owner: postgres
+--
+
+CREATE FUNCTION "InHire".ranking_skills(p_ano integer, p_mes integer, p_skills text[], p_disponibilidade_min integer DEFAULT 0, p_match_completo boolean DEFAULT false, p_senioridade bigint DEFAULT NULL::bigint) RETURNS TABLE(id_colaborador bigint, nome_ficticio character varying, senioridade text, skills_atendidas bigint, skills_pedidas bigint, score_percentual numeric, total_alocado bigint, disponibilidade bigint)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'InHire'
+    AS $$
+BEGIN
+ IF p_ano IS NULL OR p_ano NOT BETWEEN 1 AND 9999 OR p_mes IS NULL OR p_mes NOT BETWEEN 1 AND 12
+ OR p_skills IS NULL OR cardinality(p_skills)=0 OR p_disponibilidade_min IS NULL
+ OR p_disponibilidade_min NOT BETWEEN -1000 AND 100
+ OR EXISTS (SELECT 1 FROM unnest(p_skills) s WHERE s IS NULL OR btrim(s)='')
+ THEN RAISE EXCEPTION 'Parametros invalidos' USING ERRCODE='22023'; END IF;
+ RETURN QUERY
+ WITH requeridas AS (
+   SELECT DISTINCT lower(btrim(s)) nome FROM unnest(p_skills) s
+ ), matches AS (
+   SELECT c.id, count(DISTINCT r.nome) atendidas
+   FROM "InHire".colaboradores c
+   JOIN "InHire".colaborador_skills cs ON cs.id_colaborador=c.id AND cs.status AND NOT cs.deletado
+   JOIN "InHire".skills sk ON sk.id=cs.id_skill AND sk.status AND NOT sk.deletado
+   JOIN requeridas r ON lower(btrim(sk.nome_skill))=r.nome
+   GROUP BY c.id
+ )
+ SELECT c.id, c.nome_abreviado, ds.descricao::text,
+        coalesce(m.atendidas,0)::bigint, (SELECT count(*) FROM requeridas)::bigint,
+-         round(coalesce(m.atendidas,0)::numeric
+100 / (SELECT count(*) FROM requeridas),2),
+        disp.total_alocado,disp.disponibilidade
+ FROM "InHire".colaboradores c
+ JOIN "InHire".disponibilidade_mensal(p_ano,p_mes) disp ON disp.id_colaborador=c.id
+ LEFT JOIN "InHire".dominios ds ON ds.id=c.id_senioridade
+ LEFT JOIN matches m ON m.id=c.id
+ WHERE c.status AND NOT c.deletado
+   AND (p_senioridade IS NULL OR c.id_senioridade=p_senioridade)
+   AND disp.disponibilidade>=p_disponibilidade_min
+   AND coalesce(m.atendidas,0)>0
+   AND (NOT p_match_completo OR m.atendidas=(SELECT count(*) FROM requeridas))
+ ORDER BY 6 DESC, 8 DESC, 1;
+END
+$$;
+
+
+ALTER FUNCTION "InHire".ranking_skills(p_ano integer, p_mes integer, p_skills text[], p_disponibilidade_min integer, p_match_completo boolean, p_senioridade bigint) OWNER TO hackathon;
+
+--
+-- TOC entry 260 (class 1255 OID 96263)
+-- Name: ranking_talentos(text[], boolean); Type: FUNCTION; Schema: InHire; Owner: postgres
+--
+
+CREATE FUNCTION "InHire".ranking_talentos(p_skills text[], p_match_completo boolean DEFAULT false) RETURNS TABLE(id_talento bigint, nome_talento character varying, skills_atendidas bigint, skills_pedidas bigint, score_percentual numeric)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'pg_catalog', 'InHire'
+    AS $$
+BEGIN
+ IF p_skills IS NULL OR cardinality(p_skills)=0 OR EXISTS (
+  SELECT 1 FROM unnest(p_skills) s WHERE s IS NULL OR btrim(s)=''
+ ) THEN RAISE EXCEPTION 'Skills invalidas' USING ERRCODE='22023'; END IF;
+ RETURN QUERY
+ WITH r AS (SELECT DISTINCT lower(btrim(s)) nome FROM unnest(p_skills) s),
+ m AS (
+  SELECT t.id,count(DISTINCT r.nome) qtd
+  FROM "InHire".talentos t
+  JOIN "InHire".talento_skills ts ON ts.id_talento=t.id
+  JOIN "InHire".skills sk ON sk.id=ts.id_skill AND sk.status AND NOT sk.deletado
+  JOIN r ON r.nome=lower(btrim(sk.nome_skill))
+  WHERE t.status GROUP BY t.id
+ )
+ SELECT t.id,t.nome_abreviado,m.qtd,(SELECT count(*) FROM r),
+        round(m.qtd::numeric*100/(SELECT count(*) FROM r),2)
+ FROM "InHire".talentos t JOIN m ON m.id=t.id
+ WHERE NOT p_match_completo OR m.qtd=(SELECT count(*) FROM r)
+ ORDER BY 5 DESC,1;
+END
+$$;
+
+
+ALTER FUNCTION "InHire".ranking_talentos(p_skills text[], p_match_completo boolean) OWNER TO hackathon;
+
+--
+-- TOC entry 237 (class 1259 OID 95808)
+-- Name: alocacoes; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".alocacoes (
+    id bigint NOT NULL,
+    id_colaborador bigint NOT NULL,
+    id_demanda bigint NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL
+);
+
+
+ALTER TABLE "InHire".alocacoes OWNER TO hackathon;
+
+--
+-- TOC entry 236 (class 1259 OID 95807)
+-- Name: alocacoes_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".alocacoes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".alocacoes_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3647 (class 0 OID 0)
+-- Dependencies: 236
+-- Name: alocacoes_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".alocacoes_id_seq OWNED BY "InHire".alocacoes.id;
+
+
+--
+-- TOC entry 233 (class 1259 OID 95764)
+-- Name: colaborador_skills; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".colaborador_skills (
+    id bigint NOT NULL,
+    id_colaborador bigint NOT NULL,
+    id_skill bigint NOT NULL,
+    nivel_conhecimento character varying(20) NOT NULL,
+    id_nivel_conhecimento bigint NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT colaborador_skills_nivel_conhecimento_check CHECK (((nivel_conhecimento)::text = ANY ((ARRAY['BASICO'::character varying, 'INTERMEDIARIO'::character varying, 'AVANCADO'::character varying])::text[])))
+);
+
+
+ALTER TABLE "InHire".colaborador_skills OWNER TO hackathon;
+
+--
+-- TOC entry 232 (class 1259 OID 95763)
+-- Name: colaborador_skills_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".colaborador_skills_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".colaborador_skills_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3648 (class 0 OID 0)
+-- Dependencies: 232
+-- Name: colaborador_skills_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".colaborador_skills_id_seq OWNED BY "InHire".colaborador_skills.id;
+
+
+--
+-- TOC entry 227 (class 1259 OID 95655)
+-- Name: colaboradores; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".colaboradores (
+    id bigint NOT NULL,
+    nome_abreviado character varying(255) NOT NULL,
+    data_admissao timestamp with time zone,
+    id_cargo bigint NOT NULL,
+    id_senioridade bigint NOT NULL,
+    id_step bigint NOT NULL,
+    id_vinculo bigint NOT NULL,
+    id_modalidade bigint NOT NULL,
+    id_setor_empresa bigint,
+    id_contrato bigint,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT colaboradores_nome_abreviado_check CHECK ((btrim((nome_abreviado)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".colaboradores OWNER TO hackathon;
+
+--
+-- TOC entry 226 (class 1259 OID 95654)
+-- Name: colaboradores_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".colaboradores_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".colaboradores_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3649 (class 0 OID 0)
+-- Dependencies: 226
+-- Name: colaboradores_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".colaboradores_id_seq OWNED BY "InHire".colaboradores.id;
+
+
+--
+-- TOC entry 225 (class 1259 OID 95634)
+-- Name: contratos; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".contratos (
+    id bigint NOT NULL,
+    nome_contrato character varying(100) NOT NULL,
+    data_inicio date NOT NULL,
+    data_termino date NOT NULL,
+    id_situacao bigint NOT NULL,
+    id_centro_custo bigint NOT NULL,
+    id_preposto bigint NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT contratos_check CHECK ((data_termino >= data_inicio)),
+    CONSTRAINT contratos_nome_contrato_check CHECK ((btrim((nome_contrato)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".contratos OWNER TO hackathon;
+
+--
+-- TOC entry 224 (class 1259 OID 95633)
+-- Name: contratos_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".contratos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".contratos_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3650 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: contratos_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".contratos_id_seq OWNED BY "InHire".contratos.id;
+
+
+--
+-- TOC entry 235 (class 1259 OID 95789)
+-- Name: demanda_skills; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".demanda_skills (
+    id bigint NOT NULL,
+    id_demanda bigint NOT NULL,
+    id_skill bigint NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL
+);
+
+
+ALTER TABLE "InHire".demanda_skills OWNER TO hackathon;
+
+--
+-- TOC entry 234 (class 1259 OID 95788)
+-- Name: demanda_skills_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".demanda_skills_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".demanda_skills_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3651 (class 0 OID 0)
+-- Dependencies: 234
+-- Name: demanda_skills_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".demanda_skills_id_seq OWNED BY "InHire".demanda_skills.id;
+
+
+--
+-- TOC entry 229 (class 1259 OID 95705)
+-- Name: demandas; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".demandas (
+    id bigint NOT NULL,
+    nome_demanda character varying(100) NOT NULL,
+    id_gerente bigint NOT NULL,
+    id_contrato bigint NOT NULL,
+    id_tipo_servico bigint NOT NULL,
+    id_metodologia bigint,
+    id_andamento_demanda bigint NOT NULL,
+    id_grupo bigint,
+    dt_inicio_demanda date NOT NULL,
+    dt_termino_demanda_prevista date NOT NULL,
+    compartilha_profissionais boolean DEFAULT false NOT NULL,
+    pertence_pmo boolean DEFAULT false NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT demandas_check CHECK ((dt_termino_demanda_prevista >= dt_inicio_demanda)),
+    CONSTRAINT demandas_nome_demanda_check CHECK ((btrim((nome_demanda)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".demandas OWNER TO hackathon;
+
+--
+-- TOC entry 228 (class 1259 OID 95704)
+-- Name: demandas_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".demandas_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".demandas_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3652 (class 0 OID 0)
+-- Dependencies: 228
+-- Name: demandas_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".demandas_id_seq OWNED BY "InHire".demandas.id;
+
+
+--
+-- TOC entry 223 (class 1259 OID 95623)
+-- Name: dominios; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".dominios (
+    id bigint NOT NULL,
+    tipo_dominio character varying(100) NOT NULL,
+    valor_dominio character varying(100) NOT NULL,
+    descricao character varying(255),
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT dominios_tipo_dominio_check CHECK ((btrim((tipo_dominio)::text) <> ''::text)),
+    CONSTRAINT dominios_valor_dominio_check CHECK ((btrim((valor_dominio)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".dominios OWNER TO hackathon;
+
+--
+-- TOC entry 222 (class 1259 OID 95622)
+-- Name: dominios_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".dominios_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".dominios_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3653 (class 0 OID 0)
+-- Dependencies: 222
+-- Name: dominios_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".dominios_id_seq OWNED BY "InHire".dominios.id;
+
+
+--
+-- TOC entry 239 (class 1259 OID 95827)
+-- Name: planejamentos; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".planejamentos (
+    id bigint NOT NULL,
+    id_alocacao bigint NOT NULL,
+    mes character varying(3) NOT NULL,
+    ano integer NOT NULL,
+    porcentagem integer NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT planejamentos_ano_check CHECK (((ano >= 1) AND (ano <= 9999))),
+    CONSTRAINT planejamentos_mes_check CHECK (((mes)::text = ANY ((ARRAY['Jan'::character varying, 'Fev'::character varying, 'Mar'::character varying, 'Abr'::character varying, 'Mai'::character varying, 'Jun'::character varying, 'Jul'::character varying, 'Ago'::character varying, 'Set'::character varying, 'Out'::character varying, 'Nov'::character varying, 'Dez'::character varying])::text[]))),
+    CONSTRAINT planejamentos_porcentagem_check CHECK (((porcentagem >= 0) AND (porcentagem <= 100)))
+);
+
+
+ALTER TABLE "InHire".planejamentos OWNER TO hackathon;
+
+--
+-- TOC entry 238 (class 1259 OID 95826)
+-- Name: planejamentos_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".planejamentos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".planejamentos_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3654 (class 0 OID 0)
+-- Dependencies: 238
+-- Name: planejamentos_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".planejamentos_id_seq OWNED BY "InHire".planejamentos.id;
+
+
+--
+-- TOC entry 231 (class 1259 OID 95748)
+-- Name: skills; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".skills (
+    id bigint NOT NULL,
+    nome_skill character varying(100) NOT NULL,
+    id_area_tecnologia bigint NOT NULL,
+    status boolean DEFAULT true NOT NULL,
+    deletado boolean DEFAULT false NOT NULL,
+    CONSTRAINT skills_nome_skill_check CHECK ((btrim((nome_skill)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".skills OWNER TO hackathon;
+
+--
+-- TOC entry 230 (class 1259 OID 95747)
+-- Name: skills_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".skills_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".skills_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3655 (class 0 OID 0)
+-- Dependencies: 230
+-- Name: skills_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".skills_id_seq OWNED BY "InHire".skills.id;
+
+
+--
+-- TOC entry 243 (class 1259 OID 95897)
+-- Name: talento_skills; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".talento_skills (
+    id bigint NOT NULL,
+    id_talento bigint NOT NULL,
+    id_skill bigint NOT NULL,
+    id_nivel_conhecimento bigint NOT NULL
+);
+
+
+ALTER TABLE "InHire".talento_skills OWNER TO hackathon;
+
+--
+-- TOC entry 242 (class 1259 OID 95896)
+-- Name: talento_skills_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".talento_skills_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".talento_skills_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3656 (class 0 OID 0)
+-- Dependencies: 242
+-- Name: talento_skills_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".talento_skills_id_seq OWNED BY "InHire".talento_skills.id;
+
+
+--
+-- TOC entry 241 (class 1259 OID 95871)
+-- Name: talentos; Type: TABLE; Schema: InHire; Owner: postgres
+--
+
+CREATE TABLE "InHire".talentos (
+    id bigint NOT NULL,
+    nome_abreviado character varying(255) NOT NULL,
+    id_cargo bigint,
+    id_senioridade bigint,
+    id_modalidade bigint,
+    disponibilidade_informada_percentual integer,
+    status boolean DEFAULT true NOT NULL,
+    criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT talentos_disponibilidade_informada_percentual_check CHECK (((disponibilidade_informada_percentual >= 0) AND (disponibilidade_informada_percentual <= 100))),
+    CONSTRAINT talentos_nome_abreviado_check CHECK ((btrim((nome_abreviado)::text) <> ''::text))
+);
+
+
+ALTER TABLE "InHire".talentos OWNER TO hackathon;
+
+--
+-- TOC entry 240 (class 1259 OID 95870)
+-- Name: talentos_id_seq; Type: SEQUENCE; Schema: InHire; Owner: postgres
+--
+
+CREATE SEQUENCE "InHire".talentos_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "InHire".talentos_id_seq OWNER TO hackathon;
+
+--
+-- TOC entry 3657 (class 0 OID 0)
+-- Dependencies: 240
+-- Name: talentos_id_seq; Type: SEQUENCE OWNED BY; Schema: InHire; Owner: postgres
+--
+
+ALTER SEQUENCE "InHire".talentos_id_seq OWNED BY "InHire".talentos.id;
+
+
+--
+-- TOC entry 244 (class 1259 OID 95925)
+-- Name: vw_inconsistencias_dominios; Type: VIEW; Schema: InHire; Owner: postgres
+--
+
+CREATE VIEW "InHire".vw_inconsistencias_dominios AS
+ WITH referencias AS (
+         SELECT 'colaboradores'::text AS tabela,
+            c.id AS id_registro,
+            v.campo,
+            v.id_dominio,
+            v.tipo_esperado
+           FROM ("InHire".colaboradores c
+             CROSS JOIN LATERAL ( VALUES ('id_cargo'::text,c.id_cargo,'CARGO'::text), ('id_senioridade'::text,c.id_senioridade,'SENIORIDADE'::text), ('id_step'::text,c.id_step,'STEP'::text), ('id_vinculo'::text,c.id_vinculo,'VINCULO'::text), ('id_modalidade'::text,c.id_modalidade,'MODALIDADE'::text), ('id_setor_empresa'::text,c.id_setor_empresa,'SETOR_EMPRESA'::text)) v(campo, id_dominio, tipo_esperado))
+        UNION ALL
+         SELECT 'contratos'::text,
+            c.id,
+            v.campo,
+            v.id_dominio,
+            v.tipo_esperado
+           FROM ("InHire".contratos c
+             CROSS JOIN LATERAL ( VALUES ('id_situacao'::text,c.id_situacao,'SITUACAO_CONTRATO'::text), ('id_centro_custo'::text,c.id_centro_custo,'CENTRO_CUSTO'::text)) v(campo, id_dominio, tipo_esperado))
+        UNION ALL
+         SELECT 'demandas'::text,
+            d_1.id,
+            v.campo,
+            v.id_dominio,
+            v.tipo_esperado
+           FROM ("InHire".demandas d_1
+             CROSS JOIN LATERAL ( VALUES ('id_tipo_servico'::text,d_1.id_tipo_servico,'TIPO_SERVICO'::text), ('id_metodologia'::text,d_1.id_metodologia,'METODOLOGIA'::text), ('id_andamento_demanda'::text,d_1.id_andamento_demanda,'ANDAMENTO_DEMANDA'::text), ('id_grupo'::text,d_1.id_grupo,'GRUPO'::text)) v(campo, id_dominio, tipo_esperado))
+        UNION ALL
+         SELECT 'skills'::text,
+            skills.id,
+            'id_area_tecnologia'::text,
+            skills.id_area_tecnologia,
+            'AREA_TECNOLOGIA'::text
+           FROM "InHire".skills
+        UNION ALL
+         SELECT 'colaborador_skills'::text,
+            colaborador_skills.id,
+            'id_nivel_conhecimento'::text,
+            colaborador_skills.id_nivel_conhecimento,
+            'NIVEL_CONHECIMENTO'::text
+           FROM "InHire".colaborador_skills
+        UNION ALL
+         SELECT 'talentos'::text,
+            t.id,
+            v.campo,
+            v.id_dominio,
+            v.tipo_esperado
+           FROM ("InHire".talentos t
+             CROSS JOIN LATERAL ( VALUES ('id_cargo'::text,t.id_cargo,'CARGO'::text), ('id_senioridade'::text,t.id_senioridade,'SENIORIDADE'::text), ('id_modalidade'::text,t.id_modalidade,'MODALIDADE'::text)) v(campo, id_dominio, tipo_esperado))
+        UNION ALL
+         SELECT 'talento_skills'::text,
+            talento_skills.id,
+            'id_nivel_conhecimento'::text,
+            talento_skills.id_nivel_conhecimento,
+            'NIVEL_CONHECIMENTO'::text
+           FROM "InHire".talento_skills
+        )
+ SELECT r.tabela,
+    r.id_registro,
+    r.campo,
+    r.id_dominio,
+    r.tipo_esperado,
+    d.tipo_dominio AS tipo_encontrado
+   FROM (referencias r
+     LEFT JOIN "InHire".dominios d ON ((d.id = r.id_dominio)))
+  WHERE ((r.id_dominio IS NOT NULL) AND ((d.tipo_dominio)::text IS DISTINCT FROM r.tipo_esperado));
+
+
+ALTER VIEW "InHire".vw_inconsistencias_dominios OWNER TO hackathon;
+
+--
+-- TOC entry 3362 (class 2604 OID 95811)
+-- Name: alocacoes id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".alocacoes ALTER COLUMN id SET DEFAULT nextval('"InHire".alocacoes_id_seq'::regclass);
+
+
+--
+-- TOC entry 3356 (class 2604 OID 95767)
+-- Name: colaborador_skills id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".colaborador_skills ALTER COLUMN id SET DEFAULT nextval('"InHire".colaborador_skills_id_seq'::regclass);
+
+
+--
+-- TOC entry 3345 (class 2604 OID 95658)
+-- Name: colaboradores id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".colaboradores ALTER COLUMN id SET DEFAULT nextval('"InHire".colaboradores_id_seq'::regclass);
+
+
+--
+-- TOC entry 3342 (class 2604 OID 95637)
+-- Name: contratos id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".contratos ALTER COLUMN id SET DEFAULT nextval('"InHire".contratos_id_seq'::regclass);
+
+
+--
+-- TOC entry 3359 (class 2604 OID 95792)
+-- Name: demanda_skills id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".demanda_skills ALTER COLUMN id SET DEFAULT nextval('"InHire".demanda_skills_id_seq'::regclass);
+
+
+--
+-- TOC entry 3348 (class 2604 OID 95708)
+-- Name: demandas id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".demandas ALTER COLUMN id SET DEFAULT nextval('"InHire".demandas_id_seq'::regclass);
+
+
+--
+-- TOC entry 3339 (class 2604 OID 95626)
+-- Name: dominios id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".dominios ALTER COLUMN id SET DEFAULT nextval('"InHire".dominios_id_seq'::regclass);
+
+
+--
+-- TOC entry 3365 (class 2604 OID 95830)
+-- Name: planejamentos id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".planejamentos ALTER COLUMN id SET DEFAULT nextval('"InHire".planejamentos_id_seq'::regclass);
+
+
+--
+-- TOC entry 3353 (class 2604 OID 95751)
+-- Name: skills id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".skills ALTER COLUMN id SET DEFAULT nextval('"InHire".skills_id_seq'::regclass);
+
+
+--
+-- TOC entry 3371 (class 2604 OID 95900)
+-- Name: talento_skills id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".talento_skills ALTER COLUMN id SET DEFAULT nextval('"InHire".talento_skills_id_seq'::regclass);
+
+
+--
+-- TOC entry 3368 (class 2604 OID 95874)
+-- Name: talentos id; Type: DEFAULT; Schema: InHire; Owner: postgres
+--
+
+ALTER TABLE ONLY "InHire".talentos ALTER COLUMN id SET DEFAULT nextval('"InHire".talentos_id_seq'::regclass);
+
+
+--
+-- TOC entry 3635 (class 0 OID 95808)
+-- Dependencies: 237
+-- Data for Name: alocacoes; Type: TABLE DATA; Schema: InHire; Owner: postgres
+--

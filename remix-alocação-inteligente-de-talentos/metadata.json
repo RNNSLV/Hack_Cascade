@@ -1,0 +1,8 @@
+{
+  "name": "Remix Alocação Inteligente de Talentos",
+  "description": "Sistema de busca em cascata e alocação algorítmica de talentos (SGBD Interno, InHire e Workana API) desenvolvido para o Hackathon VINT Global + INBEC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
