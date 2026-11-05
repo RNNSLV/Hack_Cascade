@@ -3,16 +3,15 @@ import { EtapaCascataLog } from '../utils/motorAlocacao';
 import { ArrowRight } from 'lucide-react';
 
 interface PipelineCascataStatusProps {
-  etapas: EtapaCascataLog[];
+  etapas: any[];
   filtroOrigemAtivo: string;
   onSelecionarFiltroOrigem: (origem: string) => void;
   resumo: {
     total_encontrados: number;
-    total_sgbd_interno: number;
-    total_inhire: number;
-    total_workana: number;
     melhor_match_percentual: number;
-    economia_tempo_estimada: string;
+    total_sgbd_interno?: number;
+    total_inhire?: number; // <--- Adicione esta linha
+    total_workana?: number;
   };
 }
 

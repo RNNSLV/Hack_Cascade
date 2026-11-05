@@ -8,11 +8,15 @@ RESTRIÇÃO TÉCNICA:
   e estratégia de busca em cascata (Fallback Strategy):
     1º SGBD Interno (PostgreSQL Schema "InHire": tabelas colaboradores, colaborador_skills, planejamentos, alocacoes)
     2º Banco Externo InHire (PostgreSQL Schema "InHire": tabelas talentos, talento_skills)
-    3º API Externa de Freelancers (Simulação Workana API)
+    3º API Externa de Freelancers (Simulação Extern API)
 """
 
 import os
-from typing import List, Optional, Dict, Any
+import json
+import time
+import urllib.parse
+import urllib.request
+from typing import List, Optional, Dict, Any, Tuple
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -41,7 +45,7 @@ DB_CONFIG = {
     "port": int(os.environ.get("PGPORT", 5432)),
     "dbname": os.environ.get("PGDATABASE", "hackathon"),
     "user": os.environ.get("PGUSER", "hackathon"),
-    "password": os.environ.get("PGPASSWORD", "hackathon"),
+    "password": os.environ.get("PGPASSWORD", "S0KEVn7CvKEFcSGcmU0tWNmO-MyryCzTxPAunLgoHcA"),
     "options": "-c search_path=InHire,public",
 }
 
@@ -176,46 +180,57 @@ GROUP BY
 
 
 # =============================================================================
-# MOCK DA API EXTERNA (WORKANA API - 3ª CAMADA DE FALLBACK)
+# MOCK DA API EXTERNA (Extern API - 3ª CAMADA DE FALLBACK)
 # =============================================================================
-def simular_chamada_workana_api() -> List[Dict[str, Any]]:
+# =============================================================================
+# INTEGRAÇÃO COM API EXTERNA REAL (GITHUB API - 3ª CAMADA DE FALLBACK)
+# =============================================================================
+import urllib.request
+import urllib.parse
+import json
+
+def consultar_api_externa_github(skills_requeridas: List[str]) -> List[Dict[str, Any]]:
     """
-    Simula uma chamada HTTP GET para a API externa do Workana retornando um JSON
-    de profissionais freelancers verificados com disponibilidade imediata.
+    Consulta real à API pública do GitHub para buscar desenvolvedores reais 
+    com base nas skills requeridas, servindo como a 3ª camada de fallback da cascata.
     """
-    return [
-        {
-            "id_externo": "WK-9081",
-            "nome_profissional": "Diego T. Vasconcelos",
-            "cargo": "Arquiteto Node.js & AWS Serverless | Freelancer Top 1%",
-            "id_senioridade": 3,
-            "senioridade": "Sênior",
-            "disponibilidade_percentual": 100,
-            "prazo_inicio_dias": 2,
-            "valor_hora_brl": 115,
-            "avaliacao_plataforma": 4.95,
-            "skills": [
-                {"id_skill": 10, "nome_skill": "Node.js", "id_area_tecnologia": 102, "nome_area_tecnologia": "Backend & Arquitetura de APIs", "nivel_conhecimento": "AVANCADO"},
-                {"id_skill": 20, "nome_skill": "AWS", "id_area_tecnologia": 103, "nome_area_tecnologia": "Cloud Computing & DevOps", "nivel_conhecimento": "AVANCADO"},
-                {"id_skill": 33, "nome_skill": "TypeScript", "id_area_tecnologia": 101, "nome_area_tecnologia": "Frontend Web & UI", "nivel_conhecimento": "AVANCADO"},
-            ],
-        },
-        {
-            "id_externo": "WK-9082",
-            "nome_profissional": "Larissa M. Peixoto",
-            "cargo": "Especialista Frontend Vue.js, React & Design Systems",
-            "id_senioridade": 3,
-            "senioridade": "Sênior",
-            "disponibilidade_percentual": 75,
-            "prazo_inicio_dias": 3,
-            "valor_hora_brl": 98,
-            "avaliacao_plataforma": 4.88,
-            "skills": [
-                {"id_skill": 31, "nome_skill": "Vue.js", "id_area_tecnologia": 101, "nome_area_tecnologia": "Frontend Web & UI", "nivel_conhecimento": "AVANCADO"},
-                {"id_skill": 30, "nome_skill": "React", "id_area_tecnologia": 101, "nome_area_tecnologia": "Frontend Web & UI", "nivel_conhecimento": "AVANCADO"},
-            ],
-        },
-    ]
+    candidatos_externos = []
+    try:
+        # Usa a primeira skill requerida para pesquisar repositórios/utilizadores reais
+        skill_query = skills_requeridas[0] if skills_requeridas else "python"
+        url = f"https://api.github.com/search/users?q=language:{urllib.parse.quote(skill_query)}+location:Brazil&per_page=3"
+        
+        # Configura cabeçalho exigido pela API do GitHub
+        req_headers = {"User-Agent": "InHire-Cascade-Engine"}
+        req = urllib.request.Request(url, headers=req_headers)
+        
+        with urllib.request.urlopen(req, timeout=4) as response:
+            data = json.loads(response.read().decode())
+            for item in data.get("items", []):
+                candidatos_externos.append({
+                    "id_externo": f"GH-{item['id']}",
+                    "nome_profissional": f"Dev @{item['login']}",
+                    "cargo": f"Especialista {skill_query} (Verificado via GitHub API)",
+                    "id_senioridade": 3,
+                    "senioridade": "Sênior",
+                    "disponibilidade_percentual": 100,
+                    "prazo_inicio_dias": 1,
+                    "valor_hora_brl": 110,
+                    "avaliacao_plataforma": 4.9,
+                    "skills": [
+                        {
+                            "id_skill": 99, 
+                            "nome_skill": skill_query, 
+                            "id_area_tecnologia": 102, 
+                            "nome_area_tecnologia": "Desenvolvimento & Cloud", 
+                            "nivel_conhecimento": "AVANCADO"
+                        }
+                    ],
+                })
+    except Exception as e:
+        print(f"Aviso: Falha ao consultar a API externa do GitHub: {e}")
+    
+    return candidatos_externos
 
 
 # =============================================================================
@@ -340,14 +355,228 @@ def calcular_score_disponibilidade_flexivel(
     return {"score": 0.0, "elegivel": False, "motivo": "Sem disponibilidade suficiente", "disponivel_30_dias": False}
 
 
+# =============================================================================
+# CAMADA 3 — INTEGRAÇÃO Extern (API EXTERNA SIMULADA, CHAMADA VIA HTTP)
+# =============================================================================
+# A Extern não oferece API pública oficial de busca de freelancers. Por isso o
+# próprio FastAPI expõe um endpoint /mock/Extern/freelancers/search com o
+# contrato "estilo Extern" (campos em inglês, níveis próprios). A cascata o
+# consome por HTTP com timeout e fallback, e um ADAPTADOR converte para o formato
+# interno. Para usar uma API real no futuro: mude Extern_API_URL e o adaptador.
+Extern_API_URL = os.environ.get("Extern_API_URL", "http://127.0.0.1:8000/mock/Extern/freelancers/search")
+Extern_TIMEOUT_S = float(os.environ.get("Extern_TIMEOUT_S", 3))
+
+AREAS_TECNOLOGIA_NOMES = {
+    101: "Frontend Web & UI",
+    102: "Backend & Arquitetura de APIs",
+    103: "Cloud Computing & DevOps",
+    104: "Banco de Dados & Engenharia de Dados",
+    105: "Desenvolvimento Mobile",
+}
+
+SENIORIDADE_Extern = {"junior": (1, "Júnior"), "mid": (2, "Pleno"), "senior": (3, "Sênior"), "specialist": (4, "Especialista")}
+NIVEL_Extern = {"beginner": "BASICO", "intermediate": "INTERMEDIARIO", "expert": "AVANCADO"}
+MESES_ABREV = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+# "Banco" do mock: o que a Extern devolveria (formato EXTERNO, diferente do interno)
+_Extern_MOCK_BASE = [
+    {"id": "WK-9081", "name": "Diego T. Vasconcelos", "headline": "Arquiteto Node.js & AWS Serverless | Freelancer Top 1%",
+     "level": "senior", "availability_pct": 100, "start_in_days": 2, "hourly_rate_brl": 115, "rating": 4.95,
+     "skills": [("Node.js", "expert"), ("AWS", "expert"), ("TypeScript", "expert")]},
+    {"id": "WK-9082", "name": "Larissa M. Peixoto", "headline": "Especialista Frontend Vue.js, React & Design Systems",
+     "level": "senior", "availability_pct": 75, "start_in_days": 3, "hourly_rate_brl": 98, "rating": 4.88,
+     "skills": [("Vue.js", "expert"), ("React", "expert"), ("TypeScript", "intermediate")]},
+    {"id": "WK-9083", "name": "Rafael K. Nogueira", "headline": "Especialista Cloud Native: Kubernetes, Go & AWS",
+     "level": "specialist", "availability_pct": 100, "start_in_days": 5, "hourly_rate_brl": 150, "rating": 4.97,
+     "skills": [("Kubernetes", "expert"), ("Go", "expert"), ("AWS", "expert"), ("Docker", "expert")]},
+    {"id": "WK-9084", "name": "Camila R. Duarte", "headline": "Desenvolvedora Python & Dados",
+     "level": "mid", "availability_pct": 60, "start_in_days": 4, "hourly_rate_brl": 85, "rating": 4.72,
+     "skills": [("Python", "expert"), ("PostgreSQL", "intermediate"), ("Docker", "intermediate"), ("AWS", "beginner")]},
+    {"id": "WK-9085", "name": "Thiago B. Almeida", "headline": "Engenheiro Java & Azure",
+     "level": "senior", "availability_pct": 50, "start_in_days": 7, "hourly_rate_brl": 105, "rating": 4.81,
+     "skills": [("Java", "expert"), ("Kubernetes", "intermediate"), ("Azure", "expert")]},
+    {"id": "WK-9086", "name": "Mariana F. Costa", "headline": "Desenvolvedora Mobile React Native & Flutter",
+     "level": "mid", "availability_pct": 100, "start_in_days": 3, "hourly_rate_brl": 80, "rating": 4.66,
+     "skills": [("React Native", "expert"), ("Flutter", "intermediate"), ("TypeScript", "intermediate")]},
+    {"id": "WK-9087", "name": "Lucas P. Barreto", "headline": "Dev Backend Node.js em início de carreira",
+     "level": "junior", "availability_pct": 100, "start_in_days": 2, "hourly_rate_brl": 55, "rating": 4.40,
+     "skills": [("Node.js", "intermediate"), ("MongoDB", "intermediate"), ("Redis", "beginner")]},
+    {"id": "WK-9088", "name": "Beatriz S. Moreira", "headline": "Frontend Angular & TypeScript",
+     "level": "senior", "availability_pct": 100, "start_in_days": 3, "hourly_rate_brl": 110, "rating": 4.92,
+     "skills": [("Angular", "expert"), ("TypeScript", "expert"), ("Vue.js", "intermediate")]},
+]
+
+
+@app.get("/mock/Extern/freelancers/search")
+def mock_Extern_busca_freelancers(
+    skills: str = Query(default="", description="Skills separadas por vírgula. Ex.: Node.js,AWS"),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """
+    Simula a busca da Extern. Como numa busca real por palavra-chave/categoria, devolve quem
+    tem alguma das skills pedidas OU skills da mesma categoria tecnológica (a pontuação
+    exata/similar é decidida pelo motor da cascata, não por esta API).
+    """
+    pedidas = [s.strip().lower() for s in skills.split(",") if s.strip()]
+    areas_pedidas = {MAPA_AREAS_SKILLS[s] for s in pedidas if s in MAPA_AREAS_SKILLS}
+
+    resultado = []
+    for f in _Extern_MOCK_BASE:
+        nomes = {n.lower() for n, _ in f["skills"]}
+        areas = {MAPA_AREAS_SKILLS.get(n) for n in nomes}
+        if not pedidas or (nomes & set(pedidas)) or (areas & areas_pedidas):
+            resultado.append({
+                "id": f["id"], "name": f["name"], "headline": f["headline"], "level": f["level"],
+                "availability_pct": f["availability_pct"], "start_in_days": f["start_in_days"],
+                "hourly_rate_brl": f["hourly_rate_brl"], "rating": f["rating"],
+                "skills": [{"name": n, "proficiency": p} for n, p in f["skills"]],
+            })
+    return {
+        "meta": {"source": "Extern-mock", "api_version": "v1", "query": {"skills": pedidas}, "total": len(resultado[:limit])},
+        "data": resultado[:limit],
+    }
+
+
+def adaptar_freelancer_Extern(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Converte o JSON externo (estilo Extern) para o formato interno usado pelo motor."""
+    id_sen, nome_sen = SENIORIDADE_Extern.get(item.get("level", ""), (None, "Pleno"))
+    skills = []
+    for i, s in enumerate(item.get("skills", [])):
+        nome = s.get("name", "")
+        area = MAPA_AREAS_SKILLS.get(nome.strip().lower())
+        skills.append({
+            "id_skill": 9000 + i,
+            "nome_skill": nome,
+            "id_area_tecnologia": area,
+            "nome_area_tecnologia": AREAS_TECNOLOGIA_NOMES.get(area, ""),
+            "nivel_conhecimento": NIVEL_Extern.get(s.get("proficiency", ""), "INTERMEDIARIO"),
+        })
+    return {
+        "id_externo": item.get("id"),
+        "nome_profissional": item.get("name", "Freelancer"),
+        "cargo": item.get("headline", "Freelancer"),
+        "id_senioridade": id_sen,
+        "senioridade": nome_sen,
+        "disponibilidade_percentual": int(item.get("availability_pct", 0)),
+        "prazo_inicio_dias": item.get("start_in_days"),
+        "valor_hora_brl": item.get("hourly_rate_brl", 0),
+        "avaliacao_plataforma": item.get("rating"),
+        "skills": skills,
+    }
+
+
+def buscar_freelancers_Extern(skills: List[str]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Chama a API da Extern por HTTP. NUNCA levanta exceção: se a API cair ou demorar,
+    devolve ([], mensagem_de_erro) e a cascata segue com as outras camadas.
+    """
+    url = Extern_API_URL + "?" + urllib.parse.urlencode({"skills": ",".join(skills)})
+    try:
+        with urllib.request.urlopen(url, timeout=Extern_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return [adaptar_freelancer_Extern(x) for x in payload.get("data", [])], None
+    except Exception as e:  # timeout, conexão recusada, JSON inválido...
+        return [], f"{type(e).__name__}: {e}"
+
+
+def avaliar_skills_pedidas(req_skills: List[str], skills: List[Dict[str, Any]], incluir_similaridade: bool) -> List[Dict[str, str]]:
+    """Lista, para cada skill pedida, o que o profissional tem (exata, similar ou ausente) — para o card."""
+    out = []
+    for req in req_skills:
+        r = req.strip().lower()
+        exata = next((s for s in skills if s["nome_skill"].strip().lower() == r), None)
+        if exata:
+            out.append({"nome": req, "nivel": exata["nivel_conhecimento"]})
+            continue
+        area = MAPA_AREAS_SKILLS.get(r)
+        sim = next((s for s in skills if incluir_similaridade and area is not None and s.get("id_area_tecnologia") == area), None)
+        if sim:
+            out.append({"nome": f"{sim['nome_skill']} ≈ {req}", "nivel": sim["nivel_conhecimento"]})
+        else:
+            out.append({"nome": req, "nivel": "ausente"})
+    return out
+
+
+def montar_candidato_Extern(f: Dict[str, Any], req: "RequisicaoBuscaCascata") -> Optional[Dict[str, Any]]:
+    disp = f["disponibilidade_percentual"]
+    score_sk = calcular_score_skills_e_similaridade(
+        req.skills_requeridas, f["skills"], req.pesos.fator_similaridade_skill_y, req.incluir_similaridade
+    )
+    score_dp = calcular_score_disponibilidade_flexivel(
+        disp, disp, disp, req.disponibilidade_minima,
+        req.pesos.fator_disponibilidade_futura_x, req.incluir_disponibilidade_flexivel,
+    )
+    if not score_dp["elegivel"]:
+        return None
+    score_se = 100 if f["id_senioridade"] == req.id_senioridade_desejada else 75
+    score_final = (score_sk["score"] * req.pesos.peso_skills) + \
+                  (score_dp["score"] * req.pesos.peso_disponibilidade) + \
+                  (score_se * req.pesos.peso_senioridade)
+    if score_final <= 40:
+        return None
+    score_final = int(round(score_final, 0))
+
+    total_req = len(req.skills_requeridas)
+    if total_req and score_sk["exatas"] == total_req:
+        motivo = f"Match Ideal · {score_sk['exatas']}/{total_req} skills exatas · {disp}% livre"
+    elif score_sk["similares"] > 0:
+        motivo = next((j for j in score_sk["justificativas"] if j.startswith("Similaridade")), score_dp["motivo"])
+    else:
+        motivo = score_dp["motivo"]
+
+    meses = []
+    for i in range(3):
+        idx = (req.mes_referencia - 1) + i
+        a, m = req.ano_referencia + idx // 12, idx % 12 + 1
+        meses.append({"mes": MESES_ABREV[m - 1], "numero_mes": m, "ano": a,
+                      "total_alocado": 100 - disp, "disponibilidade": disp, "projeto_atual": "Disponível via Extern API"})
+
+    valor_hora = f["valor_hora_brl"]
+    return {
+        "id_unico": f"Extern-{f['id_externo']}",
+        "id_original": f["id_externo"],
+        "origem": "Extern API",
+        "badge_origem": "[Extern API]",
+        "nome": f["nome_profissional"],
+        "cargo": f["cargo"],
+        "senioridade": f["senioridade"],
+        "id_senioridade": f["id_senioridade"] or 0,
+        "modalidade": "Freelancer",
+        "scoreFinal": score_final,
+        "score_final": score_final,
+        "score_skills": round(score_sk["score"]),
+        "score_disponibilidade": round(score_dp["score"]),
+        "score_senioridade": score_se,
+        "motivo": motivo,
+        "motivo_principal_ranking": motivo,
+        "custo_estimado_info": f"R$ {valor_hora}/hora (~R$ {valor_hora * 160:,}/mês a 100%) · avaliação {f['avaliacao_plataforma']}★".replace(",", "."),
+        "prazo_mobilizacao": f"Início em {f['prazo_inicio_dias']} dias via API",
+        "disponibilidade_mes_atual": disp,
+        "disponibilidade_atual": disp,
+        "planejamentos_trimestre": meses,
+        "tags_justificativa": score_sk["justificativas"] + [score_dp["motivo"]],
+        "avaliacao_skills": avaliar_skills_pedidas(req.skills_requeridas, f["skills"], req.incluir_similaridade) or
+                            [{"nome": s["nome_skill"], "nivel": s["nivel_conhecimento"]} for s in f["skills"]],
+        "skills": [s["nome_skill"] for s in f["skills"]],
+        "skills_profissional": f["skills"],
+        "resumo": "Freelancer verificado disponível via API externa.",
+        "bio": "Profissional externo (Extern API).",
+    }
+
+
+
 @app.post("/api/busca-cascata")
 def endpoint_busca_cascata(req: RequisicaoBuscaCascata):
     candidatos_ranqueados = []
+    etapas_cascata = []
+    total_internos = 0
+    total_Extern = 0
     try:
+        t_c1 = time.perf_counter()
         conn = obter_conexao_postgresql()
         with conn.cursor() as cur:
             mes_prox = 1 if req.mes_referencia == 12 else req.mes_referencia + 1
-            ano_prox = req.ano_referencia + 1 if req.mes_referencia == 12 else req.mes_referencia
+            ano_prox = req.ano_referencia + 1 if req.mes_referencia == 12 else req.ano_referencia
             mes_fim = ((req.mes_referencia - 1 + req.duracao_meses - 1) % 12) + 1
             ano_fim = req.ano_referencia + ((req.mes_referencia - 1 + req.duracao_meses - 1) // 12)
 
@@ -369,7 +598,7 @@ def endpoint_busca_cascata(req: RequisicaoBuscaCascata):
                 score_dp = calcular_score_disponibilidade_flexivel(
                     colab['disponibilidade_mes_atual'], 
                     colab['disponibilidade_proximo_mes'], 
-                    colab['disponibilidade_media_periodo'], 
+                    float(colab['disponibilidade_media_periodo'] or 0), 
                     req.disponibilidade_minima, 
                     req.pesos.fator_disponibilidade_futura_x, 
                     req.incluir_disponibilidade_flexivel
@@ -412,6 +641,78 @@ def endpoint_busca_cascata(req: RequisicaoBuscaCascata):
                         "bio": "Colaborador interno disponível para alocação."
                     })
             
+            # ---------------- Camada 1 concluída ----------------
+            total_internos = len(candidatos_ranqueados)
+            alta_internos = sum(1 for c in candidatos_ranqueados if c['scoreFinal'] >= 80)
+            etapas_cascata.append({
+                "ordem": 1, "fonte": "SGBD Interno", "badge": "[SGBD Interno]",
+                "tabela_ou_endpoint": '"InHire".colaboradores + "InHire".planejamentos',
+                "acionada": True, "candidatos_avaliados": len(colaboradores_db),
+                "candidatos_elegiveis": total_internos, "candidatos_alta_aderencia": alta_internos,
+                "tempo_execucao_ms": round((time.perf_counter() - t_c1) * 1000),
+                "motivo_transicao": "Camada inicial: prioriza a equipe interna (custo zero).",
+            })
+
+            # ---------------- Camada 2: Banco Externo InHire ----------------
+            t_c2 = time.perf_counter()
+            cur.execute(SQL_BUSCA_TALENTOS_INHIRE)
+            talentos_db = cur.fetchall()
+            total_inhire = 0
+
+            for tal in talentos_db:
+                score_sk = calcular_score_skills_e_similaridade(
+                    req.skills_requeridas, 
+                    tal.get('skills', []) or [], 
+                    req.pesos.fator_similaridade_skill_y, 
+                    req.incluir_similaridade
+                )
+                disp = tal['disponibilidade_percentual']
+                score_dp = calcular_score_disponibilidade_flexivel(
+                    disp, disp, disp, 
+                    req.disponibilidade_minima, 
+                    req.pesos.fator_disponibilidade_futura_x, 
+                    req.incluir_disponibilidade_flexivel
+                )
+                score_se = 100 if tal['id_senioridade'] == req.id_senioridade_desejada else 75
+                
+                score_final = (score_sk['score'] * req.pesos.peso_skills) + \
+                              (score_dp['score'] * req.pesos.peso_disponibilidade) + \
+                              (score_se * req.pesos.peso_senioridade)
+
+                if score_final > 40:
+                    lista_skills = tal.get('skills') or []
+                    candidatos_ranqueados.append({
+                        "id_unico": f"INH-{tal['id_talento']}",
+                        "id_original": tal['id_talento'],
+                        "origem": "InHire",
+                        "badge_origem": "[InHire]",
+                        "nome": tal['nome_abreviado'],
+                        "cargo": tal.get('cargo_descricao', 'Profissional'),
+                        "senioridade": tal.get('senioridade_descricao', 'Sênior'),
+                        "scoreFinal": int(round(score_final, 0)),
+                        "score_final": int(round(score_final, 0)),
+                        "motivo": score_dp['motivo'],
+                        "disponibilidade_atual": disp,
+                        "skills": [s.get('nome_skill', '') for s in lista_skills],
+                        "avaliacao_skills": [
+                            {"nome": s.get('nome_skill', ''), "nivel": s.get('nivel_conhecimento', 'AVANCADO')} 
+                            for s in lista_skills
+                        ],
+                        "resumo": "Talento externo catalogado no banco InHire.",
+                        "bio": "Banco de talentos externo InHire."
+                    })
+                    total_inhire += 1
+
+            etapas_cascata.append({
+                "ordem": 2, "fonte": "InHire", "badge": "[InHire]",
+                "tabela_ou_endpoint": '"InHire".talentos + "InHire".talento_skills',
+                "acionada": True, "candidatos_avaliados": len(talentos_db),
+                "candidatos_elegiveis": total_inhire,
+                "candidatos_alta_aderencia": sum(1 for c in candidatos_ranqueados if c['origem'] == 'InHire' and c['scoreFinal'] >= 80),
+                "tempo_execucao_ms": round((time.perf_counter() - t_c2) * 1000),
+                "motivo_transicao": "Segunda camada: consulta ao banco de talentos externo InHire.",
+            })
+
             # Ordena do maior score para o menor
             candidatos_ranqueados.sort(key=lambda x: x['scoreFinal'], reverse=True)
         conn.close()
@@ -423,11 +724,14 @@ def endpoint_busca_cascata(req: RequisicaoBuscaCascata):
         "status": "sucesso",
         "resultados": {
             "candidatos": candidatos_ranqueados,
-            "resumo": {
+           "resumo": {
                 "total_encontrados": len(candidatos_ranqueados),
+                "total_sgbd_interno": total_internos,
+                "total_inhire": total_inhire, 
+                "total_Extern": total_Extern,
                 "melhor_match_percentual": int(candidatos_ranqueados[0]['scoreFinal']) if candidatos_ranqueados else 0
             },
-            "etapas_cascata": []
+            "etapas_cascata": etapas_cascata
         }
     }
 

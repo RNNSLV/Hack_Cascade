@@ -51,13 +51,26 @@ export default function App() {
     COLABORADORES_INTERNOS_INICIAIS
   );
   
-// NOVO ESTADO: Substitui o antigo useMemo do resultadoCascata
-  const [resultadoCascata, setResultadoCascata] = useState({
+const [resultadoCascata, setResultadoCascata] = useState<{
+    candidatos: CandidatoRanqueado[];
+    resumo: {
+      total_encontrados: number;
+      melhor_match_percentual: number;
+      total_sgbd_interno?: number;
+      total_workana?: number;
+    };
+    etapas_cascata: any[];
+  }>({
     candidatos: [],
-    resumo: { total_encontrados: 0, melhor_match_percentual: 0 },
+    resumo: { 
+      total_encontrados: 0, 
+      melhor_match_percentual: 0, 
+      total_sgbd_interno: 0, 
+      total_workana: 0 
+    },
     etapas_cascata: []
   });
-
+  
   const [alocacoesRealizadas, setAlocacoesRealizadas] = useState<RegistroAlocacao[]>([]);
   const [candidatoEmAlocacao, setCandidatoEmAlocacao] = useState<CandidatoRanqueado | null>(null);
   const [mensagemConfirmacao, setMensagemConfirmacao] = useState<string | null>(null);
